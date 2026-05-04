@@ -106,7 +106,7 @@ def run_benchmark(benchmark, ranks, opts):
     return list(itertools.chain(*allgather_object(measurements)))
 
 
-def sweep(benchmark):
+def sweep(benchmark, demo=False):
     # Synthesize the set of benchmarks to run.
     # This list contain tuples for ("string prefix", [rank...]).
     benchmarks = []
@@ -138,15 +138,22 @@ def sweep(benchmark):
     append_benchmark("  warmup", [dist.get_rank()],
                      {"use_ddp_for_single_rank": False})
 
-    # Single machine baselines
-    append_benchmark("  no ddp", range(1), {"use_ddp_for_single_rank": False})
-    append_benchmark("   1M/1G", range(1))
-    append_benchmark("   1M/2G", range(2))
-    append_benchmark("   1M/4G", range(4))
+    if demo:
+        # 1 GPU per node demo: just sweep across nodes
+        append_benchmark(" no ddp", range(1), {"use_ddp_for_single_rank": False})
+        for i in range(1, dist.get_world_size() + 1):
+            append_benchmark(" %dN/1G" % i, range(i))
+    else:
+        # Original 8-GPU-per-node sweep
+        # Single machine baselines
+        append_benchmark(" no ddp", range(1), {"use_ddp_for_single_rank": False})
+        append_benchmark(" 1M/1G", range(1))
+        append_benchmark(" 1M/2G", range(2))
+        append_benchmark(" 1M/4G", range(4))
 
-    # Multi-machine benchmarks
-    for i in range(1, (dist.get_world_size() // 8) + 1):
-        append_benchmark("   %dM/8G" % i, range(i * 8))
+        # Multi-machine benchmarks
+        for i in range(1, (dist.get_world_size() // 8) + 1):
+            append_benchmark(" %dM/8G" % i, range(i * 8))
 
     # Run benchmarks in order of increasing number of GPUs
     print_header()
@@ -225,15 +232,21 @@ def main():
     parser.add_argument("--local-rank",
                         type=str,
                         default=os.environ["LOCAL_RANK"])
+    parser.add_argument("--demo",
+                        action="store_true",
+                        help="Demo mode, skip 8-GPU assertion")
     args = parser.parse_args()
 
     num_gpus_per_node = torch.cuda.device_count()
-    assert num_gpus_per_node == 8, "Expected 8 GPUs per machine"
+    if not args.demo:
+        assert num_gpus_per_node == 8, "Expected 8 GPUs per machine"
 
     # The global process group used only for communicating benchmark
     # metadata, like measurements. Not for benchmarking itself.
-    torch.cuda.set_device(args.rank % 8)
-    device = torch.device("cuda:%d" % (args.rank % 8))
+    local_rank = int(args.local_rank)
+    torch.cuda.set_device(local_rank)
+    device = torch.device("cuda:%d" % local_rank)
+    
     dist.init_process_group(
         backend=args.distributed_backend,
         rank=args.rank,
@@ -286,7 +299,7 @@ def main():
     for benchmark in benchmarks:
         if args.rank == 0:
             print(f"\nBenchmark: {str(benchmark)}")
-        result = sweep(benchmark)
+        result = sweep(benchmark, demo=args.demo)
         benchmark_results.append({
             "model": benchmark.model,
             "batch_size": benchmark.batch_size,
